@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: student-management-frontend:latest
+          image: ghcr.io/piyumal-sandaruwan/student-management-frontend:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

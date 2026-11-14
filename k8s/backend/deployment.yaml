@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: student-management-backend:v2
+          image: ghcr.io/piyumal-sandaruwan/student-management-backend:v2
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
