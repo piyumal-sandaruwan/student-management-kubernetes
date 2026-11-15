@@ -3,6 +3,48 @@ kind: Kustomization
 namespace: student-management
 resources:
 - ../../base
+patches:
+- target:
+    version: v1
+    kind: Service
+    name: frontend
+  patch: |-
+    - op: replace
+      path: /spec/type
+      value: ClusterIP
+    - op: remove
+      path: /spec/ports/0/nodePort
+- target:
+    group: apps
+    version: v1
+    kind: StatefulSet
+    name: mongodb
+  patch: |-
+    $patch: delete
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: mongodb
+- target:
+    version: v1
+    kind: PersistentVolumeClaim
+    name: mongodb-pvc
+  patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: mongodb-pvc
+- target:
+    version: v1
+    kind: Service
+    name: mongodb
+  patch: |-
+    $patch: delete
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: mongodb
 images:
 - name: ghcr.io/piyumal-sandaruwan/student-management-backend
   newName: ghcr.io/piyumal-sandaruwan/student-management-backend

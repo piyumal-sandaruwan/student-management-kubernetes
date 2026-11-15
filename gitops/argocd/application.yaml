@@ -1,13 +1,12 @@
-# Review and replace the repository URL, target revision, and path before applying.
-# Automated sync intentionally remains disabled until the remote branch and overlay
-# have been pushed and validated, and the destination cluster is confirmed.
+# Argo CD tracks the verified GitHub repository's main branch production overlay.
+# Synchronization remains manual; review the Application diff before each sync.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: student-management
   namespace: argocd
 spec:
-  project: default
+  project: student-management
   source:
     repoURL: https://github.com/piyumal-sandaruwan/student-management-kubernetes.git
     targetRevision: main

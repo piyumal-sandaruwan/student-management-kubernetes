@@ -21,6 +21,12 @@ spec:
             - name: http
               containerPort: 5000
               protocol: TCP
+          env:
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGODB_URI
           envFrom:
             - configMapRef:
                 name: backend-config

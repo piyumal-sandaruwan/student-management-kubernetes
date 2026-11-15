@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: student-management
+  namespace: argocd
+spec:
+  description: Student Management System production deployment
+  sourceRepos:
+    - https://github.com/piyumal-sandaruwan/student-management-kubernetes.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: student-management
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
