@@ -80,9 +80,9 @@ Open the Kubernetes frontend at <http://localhost:30080>.
 
 ### Argo CD / GitOps
 
-Commit and push the reviewed manifests to a Git repository, then configure an Argo CD Application to track the repository and the `k8s/` path. The namespace manifest can be applied by Argo CD when configured to create the destination namespace, or applied beforehand. Keep credentials out of Git and provide production secrets through an approved secret-management workflow.
+The Argo CD Application manifest is `gitops/argocd/application.yaml`. It points to this repository's `main` branch and the `gitops/overlays/production` path. Argo CD cannot load that path until the GitOps files are committed and pushed. Automated sync, pruning, and self-healing are disabled. Before a manual sync, inspect `argocd app diff student-management`; the overlay includes MongoDB StatefulSet and PVC resources, so confirm their diff is safe and preserves the existing claim and data.
 
-The local file `k8s/backend/secret.yaml` is a dummy demonstration Secret and is excluded by `.gitignore`. Apply the listed manifests individually; do not apply the entire `k8s/backend` directory, which contains that local demo file. The backend ConfigMap currently contains a non-authenticated local MongoDB URI; production authentication still needs to be implemented before using this configuration for a protected deployment.
+Keep credentials out of Git and use an approved secret-management workflow for production. The local placeholder file `k8s/backend/secret.example.yaml` is excluded by `.gitignore` and is not part of the Kustomize base. Do not apply the entire `k8s/backend` directory: it could apply the placeholder Secret over an existing Secret with the same name. The backend currently reads a non-authenticated in-cluster MongoDB URI from its ConfigMap; production database authentication still needs a secret-management design before using this configuration for a protected deployment.
 
 ## Kubernetes manifest inventory
 

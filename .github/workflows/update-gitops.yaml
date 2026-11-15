@@ -1,0 +1,212 @@
+name: Update GitOps image tags
+
+on:
+  workflow_run:
+    workflows: [Publish container images]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+
+concurrency:
+  group: gitops-image-update-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate-run:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      head_sha: ${{ steps.verify.outputs.head_sha }}
+    steps:
+      - name: Validate triggering workflow run
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          EVENT_REPOSITORY_ID: ${{ github.event.repository.id }}
+          CURRENT_REPOSITORY_ID: ${{ github.repository_id }}
+          EVENT_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          [[ "$EVENT_HEAD_BRANCH" == "main" ]]
+          [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EVENT_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$EVENT_REPOSITORY_ID" =~ ^[0-9]+$ ]]
+          [[ "$CURRENT_REPOSITORY_ID" =~ ^[0-9]+$ ]]
+          [[ "$EVENT_REPOSITORY_ID" == "$CURRENT_REPOSITORY_ID" ]]
+
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${EVENT_RUN_ID}")"
+          jq -e \
+            --argjson repository_id "$EVENT_REPOSITORY_ID" \
+            --arg sha "$EVENT_HEAD_SHA" \
+            --arg branch "$EVENT_HEAD_BRANCH" \
+            --arg workflow_name "Publish container images" \
+            '.repository.id == $repository_id
+             and .workflow_id != null
+             and .name == $workflow_name
+             and .event == "push"
+             and .head_branch == $branch
+             and .head_sha == $sha
+             and .conclusion == "success"' \
+            <<< "$run_json" >/dev/null
+
+          workflow_id="$(jq -r '.workflow_id' <<< "$run_json")"
+          workflow_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}")"
+          jq -e --arg path ".github/workflows/publish-images.yaml" \
+            '.path == $path and .name == "Publish container images"' \
+            <<< "$workflow_json" >/dev/null
+
+          printf 'head_sha=%s\n' "$EVENT_HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  propose-image-update:
+    needs: validate-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out the latest main branch
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+      - name: Install pinned Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: "5.8.3"
+      - name: Set tags from the successful publication run
+        env:
+          PUBLISHED_SHA: ${{ needs.validate-run.outputs.head_sha }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [[ "$PUBLISHED_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+          kustomize edit set image \
+            "ghcr.io/${IMAGE_OWNER}/student-management-backend=ghcr.io/${IMAGE_OWNER}/student-management-backend:sha-${PUBLISHED_SHA}" \
+            "ghcr.io/${IMAGE_OWNER}/student-management-frontend=ghcr.io/${IMAGE_OWNER}/student-management-frontend:sha-${PUBLISHED_SHA}"
+        working-directory: gitops/overlays/production
+      - name: Confirm only the two intended image tags changed
+        id: verify-diff
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          PUBLISHED_SHA: ${{ needs.validate-run.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- . ':!gitops/overlays/production/kustomization.yaml' >/dev/null
+          if git diff --quiet -- gitops/overlays/production/kustomization.yaml; then
+            echo "The production overlay already has these image tags."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --unified=0 -- gitops/overlays/production/kustomization.yaml \
+            | python3 -c '
+          import os, re, sys
+          from pathlib import Path
+
+          owner = os.environ["IMAGE_OWNER"]
+          sha = os.environ["PUBLISHED_SHA"]
+          backend = f"ghcr.io/{owner}/student-management-backend"
+          frontend = f"ghcr.io/{owner}/student-management-frontend"
+          backend_pattern = re.escape(backend)
+          frontend_pattern = re.escape(frontend)
+          allowed = [
+              re.compile(r"\+images:"),
+              re.compile(rf"[+-]\s+- name: {backend_pattern}"),
+              re.compile(rf"[+-]\s+newName: {backend_pattern}"),
+              re.compile(rf"[+-]\s+- name: {frontend_pattern}"),
+              re.compile(rf"[+-]\s+newName: {frontend_pattern}"),
+              re.compile(rf"\+\s+newTag: sha-{sha}"),
+              re.compile(r"-\s+newTag: sha-[0-9a-f]{40}"),
+              re.compile(r"\+\+\+|---"),
+          ]
+          for line in sys.stdin:
+              line = line.rstrip("\n")
+              if line.startswith(("+++", "---")):
+                  continue
+              if line.startswith(("+", "-")) and not any(p.fullmatch(line) for p in allowed):
+                  raise SystemExit(f"Unexpected overlay change: {line}")
+          text = Path("gitops/overlays/production/kustomization.yaml").read_text()
+          lines = text.splitlines()
+          try:
+              images_index = next(i for i, line in enumerate(lines) if line.strip() == "images:")
+          except StopIteration:
+              raise SystemExit("Production overlay is missing its images list")
+
+          entries = {}
+          current = None
+          for line in lines[images_index + 1:]:
+              name_match = re.match(r"^\s*-\s+name:\s*(\S+)\s*$", line)
+              if name_match:
+                  current = {"name": name_match.group(1)}
+                  entries[current["name"]] = current
+                  continue
+              if current is None:
+                  continue
+              for key in ("newName", "newTag"):
+                  value_match = re.match(rf"^\s+{key}:\s*(\S+)\s*$", line)
+                  if value_match:
+                      current[key] = value_match.group(1)
+          expected = {
+              backend: f"sha-{sha}",
+              frontend: f"sha-{sha}",
+          }
+          if set(entries) != set(expected):
+              raise SystemExit("Expected one backend and one frontend image entry")
+          for name, tag in expected.items():
+              entry = entries[name]
+              if entry.get("newTag") != tag or entry.get("newName", name) != name:
+                  raise SystemExit(f"Unexpected image reference for {name}")
+          print("Only the backend and frontend references use the publication SHA.")
+          '
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Validate rendered production manifests
+        run: kustomize build gitops/overlays/production
+      - name: Create or update the GitOps pull request
+        if: steps.verify-diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHED_SHA: ${{ needs.validate-run.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          branch="codex/gitops-${PUBLISHED_SHA}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "$branch"
+          git add -- gitops/overlays/production/kustomization.yaml
+
+          if git diff --cached --quiet; then
+            echo "The overlay already references this publication SHA; no PR update is needed."
+            exit 0
+          fi
+
+          git commit -m "chore(gitops): deploy ${PUBLISHED_SHA:0:12}"
+          remote_ref="$(git ls-remote --heads origin "refs/heads/${branch}")"
+          if [[ -n "$remote_ref" ]]; then
+            expected_sha="${remote_ref%%$'\t'*}"
+            git push "--force-with-lease=refs/heads/${branch}:${expected_sha}" origin "$branch"
+          else
+            git push origin "$branch"
+          fi
+
+          pr_number="$(gh pr list \
+            --state open \
+            --base main \
+            --head "$branch" \
+            --json number \
+            --jq '.[0].number // empty')"
+          title="Deploy ${PUBLISHED_SHA:0:12}"
+          body="Updates backend and frontend image tags to the successful publication run for commit ${PUBLISHED_SHA}. Review the manifest diff before merging."
+
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head "$branch" --title "$title" --body "$body"
+          fi

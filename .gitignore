@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 k8s/backend/secret.yaml
+k8s/backend/secret.example.yaml
 
 # Dependencies and generated output
 node_modules/
