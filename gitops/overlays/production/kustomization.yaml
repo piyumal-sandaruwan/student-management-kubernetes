@@ -2,4 +2,11 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: student-management
 resources:
-  - ../../base
+- ../../base
+images:
+- name: ghcr.io/piyumal-sandaruwan/student-management-backend
+  newName: ghcr.io/piyumal-sandaruwan/student-management-backend
+  newTag: sha-6eb3ec4da0fe7597802594e393cee1783de28ccc
+- name: ghcr.io/piyumal-sandaruwan/student-management-frontend
+  newName: ghcr.io/piyumal-sandaruwan/student-management-frontend
+  newTag: sha-6eb3ec4da0fe7597802594e393cee1783de28ccc
