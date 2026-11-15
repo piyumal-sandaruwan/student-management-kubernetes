@@ -80,6 +80,8 @@ jobs:
         uses: imranismail/setup-kustomize@v2
         with:
           kustomize-version: "5.8.3"
+      - name: Render production manifests before image update
+        run: kustomize build gitops/overlays/production > "$RUNNER_TEMP/production-before.yaml"
       - name: Set tags from the successful publication run
         env:
           PUBLISHED_SHA: ${{ needs.validate-run.outputs.head_sha }}
@@ -105,69 +107,46 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git diff --unified=0 -- gitops/overlays/production/kustomization.yaml \
-            | python3 -c '
-          import os, re, sys
+          kustomize build gitops/overlays/production > "$RUNNER_TEMP/production-after.yaml"
+          python3 -c '
+          import difflib, os, re
           from pathlib import Path
 
           owner = os.environ["IMAGE_OWNER"]
           sha = os.environ["PUBLISHED_SHA"]
           backend = f"ghcr.io/{owner}/student-management-backend"
           frontend = f"ghcr.io/{owner}/student-management-frontend"
-          backend_pattern = re.escape(backend)
-          frontend_pattern = re.escape(frontend)
-          allowed = [
-              re.compile(r"\+images:"),
-              re.compile(rf"[+-]\s+- name: {backend_pattern}"),
-              re.compile(rf"[+-]\s+newName: {backend_pattern}"),
-              re.compile(rf"[+-]\s+- name: {frontend_pattern}"),
-              re.compile(rf"[+-]\s+newName: {frontend_pattern}"),
-              re.compile(rf"\+\s+newTag: sha-{sha}"),
-              re.compile(r"-\s+newTag: sha-[0-9a-f]{40}"),
-              re.compile(r"\+\+\+|---"),
-          ]
-          for line in sys.stdin:
-              line = line.rstrip("\n")
-              if line.startswith(("+++", "---")):
-                  continue
-              if line.startswith(("+", "-")) and not any(p.fullmatch(line) for p in allowed):
-                  raise SystemExit(f"Unexpected overlay change: {line}")
-          text = Path("gitops/overlays/production/kustomization.yaml").read_text()
-          lines = text.splitlines()
-          try:
-              images_index = next(i for i, line in enumerate(lines) if line.strip() == "images:")
-          except StopIteration:
-              raise SystemExit("Production overlay is missing its images list")
+          images = {"backend": backend, "frontend": frontend}
+          expected = {name: f"{ref}:sha-{sha}" for name, ref in images.items()}
 
-          entries = {}
-          current = None
-          for line in lines[images_index + 1:]:
-              name_match = re.match(r"^\s*-\s+name:\s*(\S+)\s*$", line)
-              if name_match:
-                  current = {"name": name_match.group(1)}
-                  entries[current["name"]] = current
-                  continue
-              if current is None:
-                  continue
-              for key in ("newName", "newTag"):
-                  value_match = re.match(rf"^\s+{key}:\s*(\S+)\s*$", line)
-                  if value_match:
-                      current[key] = value_match.group(1)
-          expected = {
-              backend: f"sha-{sha}",
-              frontend: f"sha-{sha}",
-          }
-          if set(entries) != set(expected):
-              raise SystemExit("Expected one backend and one frontend image entry")
-          for name, tag in expected.items():
-              entry = entries[name]
-              if entry.get("newTag") != tag or entry.get("newName", name) != name:
-                  raise SystemExit(f"Unexpected image reference for {name}")
-          print("Only the backend and frontend references use the publication SHA.")
+          def normalize(path, check_tags):
+              counts = {name: 0 for name in images}
+              result = []
+              for line in path.read_text().splitlines():
+                  match = re.match(r"^(\s*(?:-\s*)?image:\s*)(\S+)\s*$", line)
+                  if match:
+                      prefix, image = match.groups()
+                      for name, ref in images.items():
+                          if image.startswith(ref + ":"):
+                              counts[name] += 1
+                              if check_tags and image != expected[name]:
+                                  raise SystemExit(f"Unexpected {name} image reference: {image}")
+                              line = prefix + f"<{name}-image>"
+                              break
+                  result.append(line)
+              if counts != {name: 1 for name in images}:
+                  raise SystemExit(f"Expected exactly one backend and frontend image; found {counts}")
+              return result
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          before = normalize(temp / "production-before.yaml", False)
+          after = normalize(temp / "production-after.yaml", True)
+          if before != after:
+              print("".join(difflib.unified_diff(before, after, fromfile="before", tofile="after", lineterm="\n")))
+              raise SystemExit("Rendered production manifests changed beyond the intended image tags")
+          print("Rendered manifests differ only in the backend and frontend publication tags.")
           '
           echo "changed=true" >> "$GITHUB_OUTPUT"
-      - name: Validate rendered production manifests
-        run: kustomize build gitops/overlays/production
       - name: Create or update the GitOps pull request
         if: steps.verify-diff.outputs.changed == 'true'
         env:
