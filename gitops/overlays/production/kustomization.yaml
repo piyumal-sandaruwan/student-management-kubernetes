@@ -3,6 +3,7 @@ kind: Kustomization
 namespace: student-management
 resources:
 - ../../base
+- ingress.yaml
 patches:
 - target:
     version: v1
